@@ -236,6 +236,19 @@ async def odometer_now():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Tesla 公開鍵エンドポイント ────────────────────────────────
+
+
+@app.get("/.well-known/appspecific/com.tesla.3p.public-key.pem")
+async def tesla_public_key():
+    """Tesla Fleet API パートナー登録用の公開鍵を配信"""
+    public_key = os.getenv("TESLA_PUBLIC_KEY", "")
+    if not public_key:
+        raise HTTPException(status_code=404, detail="公開鍵が設定されていません")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(public_key, media_type="application/x-pem-file")
+
+
 # ─── Cloud Scheduler 用内部エンドポイント ──────────────────────
 
 
