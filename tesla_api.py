@@ -77,11 +77,11 @@ async def get_charging_history() -> list[dict]:
     戻り値: 充電セッションのリスト
     """
     headers = await _get_headers()
-    vin = await _get_vin()
+    vehicle_id = await get_vehicle_id()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
-            f"{API_BASE_URL}/api/1/vehicles/{vin}/charging_history",
+            f"{API_BASE_URL}/api/1/vehicles/{vehicle_id}/charging_history",
             headers=headers,
         )
         response.raise_for_status()
