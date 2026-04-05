@@ -310,34 +310,34 @@ async def debug_charging():
     import httpx
 
     token = await get_valid_access_token()
+    if not token:
+        return {"error": "未認証 - /auth/login からログインしてください"}
+
     headers = {"Authorization": f"Bearer {token}"}
     api_base = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
 
-    # 車両情報を取得
-    async with httpx.AsyncClient() as client:
-        v_resp = await client.get(f"{api_base}/api/1/vehicles", headers=headers)
-        vehicles = v_resp.json().get("response", [])
-
-    if not vehicles:
-        return {"error": "車両なし"}
-
-    v = vehicles[0]
-    vehicle_id = v.get("id")
-    vehicle_id_s = v.get("id_s")
-    vin = v.get("vin")
-
     results = {}
     async with httpx.AsyncClient(timeout=15.0) as client:
-        for label, url in [
-            ("id", f"{api_base}/api/1/vehicles/{vehicle_id}/charging_history"),
-            ("id_s", f"{api_base}/api/1/vehicles/{vehicle_id_s}/charging_history"),
-            ("vin", f"{api_base}/api/1/vehicles/{vin}/charging_history"),
-            ("id+params", f"{api_base}/api/1/vehicles/{vehicle_id}/charging_history?page_no=1&page_size=5"),
-        ]:
-            r = await client.get(url, headers=headers)
-            results[label] = {"status": r.status_code, "body": r.text[:200]}
+        # productsエンドポイント（vehicles以外の情報も含む）
+        r = await client.get(f"{api_base}/api/1/products", headers=headers)
+        results["products"] = {"status": r.status_code, "body": r.text[:500]}
 
-    return {"vehicle_keys": {"id": vehicle_id, "id_s": vehicle_id_s, "vin": vin}, "results": results}
+        # vehicles一覧
+        r = await client.get(f"{api_base}/api/1/vehicles", headers=headers)
+        results["vehicles"] = {"status": r.status_code, "body": r.text[:500]}
+
+        # charge_state（現在の充電状態）
+        v_data = r.json().get("response", [])
+        if v_data:
+            vid = v_data[0].get("id")
+            r2 = await client.get(
+                f"{api_base}/api/1/vehicles/{vid}/vehicle_data",
+                headers=headers,
+                params={"endpoints": "charge_state"},
+            )
+            results["charge_state"] = {"status": r2.status_code, "body": r2.text[:500]}
+
+    return results
 
 
 # ─── Cloud Scheduler 用内部エンドポイント ──────────────────────
