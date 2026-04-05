@@ -1,6 +1,6 @@
 """
 Tesla OAuth 2.0 認証モジュール
-PKCE対応のOAuth認証フローを管理し、トークンをローカルファイルに保存する
+トークンをSecret Managerに永続化（Cloud Run再起動後も維持）
 """
 import json
 import os
@@ -23,13 +23,13 @@ TESLA_AUTH_URL = "https://auth.tesla.com/oauth2/v3/authorize"
 TESLA_TOKEN_URL = "https://auth.tesla.com/oauth2/v3/token"
 
 TOKENS_FILE = Path("tokens.json")
+GCP_PROJECT = os.getenv("GCP_PROJECT", "apt-hold-492414-r6")
+SECRET_NAME = f"projects/{GCP_PROJECT}/secrets/tesla-tokens/versions/latest"
 
-# Tesla API に必要なスコープ
 SCOPES = "openid offline_access vehicle_device_data vehicle_charging_cmds"
 
 
 def generate_pkce_pair() -> tuple[str, str]:
-    """PKCE用のcode_verifierとcode_challengeを生成"""
     code_verifier = secrets.token_urlsafe(96)
     code_challenge = base64.urlsafe_b64encode(
         hashlib.sha256(code_verifier.encode()).digest()
@@ -38,7 +38,6 @@ def generate_pkce_pair() -> tuple[str, str]:
 
 
 def get_authorization_url(state: str, code_challenge: str) -> str:
-    """Tesla認証ページのURLを生成"""
     params = {
         "client_id": TESLA_CLIENT_ID,
         "redirect_uri": TESLA_REDIRECT_URI,
@@ -52,7 +51,6 @@ def get_authorization_url(state: str, code_challenge: str) -> str:
 
 
 async def exchange_code_for_tokens(code: str, code_verifier: str) -> dict:
-    """認証コードをアクセストークンに交換"""
     async with httpx.AsyncClient() as client:
         response = await client.post(
             TESLA_TOKEN_URL,
@@ -67,14 +65,12 @@ async def exchange_code_for_tokens(code: str, code_verifier: str) -> dict:
         )
         response.raise_for_status()
         tokens = response.json()
-        # 有効期限を絶対時刻で保存
         tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
         save_tokens(tokens)
         return tokens
 
 
 async def refresh_access_token(refresh_token: str) -> dict:
-    """リフレッシュトークンでアクセストークンを更新"""
     async with httpx.AsyncClient() as client:
         response = await client.post(
             TESLA_TOKEN_URL,
@@ -92,35 +88,63 @@ async def refresh_access_token(refresh_token: str) -> dict:
         return tokens
 
 
+def _load_from_secret_manager() -> dict | None:
+    """Secret Manager からトークンを読み込む"""
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        response = client.access_secret_version(name=SECRET_NAME)
+        return json.loads(response.payload.data.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _save_to_secret_manager(tokens: dict) -> None:
+    """Secret Manager にトークンを保存（新バージョンを追加）"""
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        secret_path = f"projects/{GCP_PROJECT}/secrets/tesla-tokens"
+        client.add_secret_version(
+            parent=secret_path,
+            payload={"data": json.dumps(tokens).encode("utf-8")},
+        )
+    except Exception as e:
+        print(f"[Auth] Secret Manager保存エラー: {e}")
+
+
 def save_tokens(tokens: dict) -> None:
-    """トークンをファイルに保存（.gitignore対象）"""
+    """トークンをローカルファイルとSecret Managerに保存"""
     TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+    _save_to_secret_manager(tokens)
 
 
 def load_tokens() -> dict | None:
-    """保存済みトークンを読み込む"""
-    if not TOKENS_FILE.exists():
-        return None
-    return json.loads(TOKENS_FILE.read_text())
+    """トークンを読み込む（ローカル→Secret Managerの順）"""
+    if TOKENS_FILE.exists():
+        try:
+            return json.loads(TOKENS_FILE.read_text())
+        except Exception:
+            pass
+    # ローカルになければSecret Managerから取得
+    tokens = _load_from_secret_manager()
+    if tokens:
+        TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+    return tokens
 
 
 async def get_valid_access_token() -> str | None:
-    """有効なアクセストークンを返す（必要に応じてリフレッシュ）"""
     tokens = load_tokens()
     if not tokens:
         return None
-
-    # 有効期限の60秒前にリフレッシュ
     if time.time() >= tokens.get("expires_at", 0) - 60:
         try:
             tokens = await refresh_access_token(tokens["refresh_token"])
         except Exception:
             return None
-
     return tokens.get("access_token")
 
 
 def is_authenticated() -> bool:
-    """認証済みかどうかを確認"""
     tokens = load_tokens()
     return tokens is not None and "refresh_token" in tokens
