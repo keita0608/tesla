@@ -236,6 +236,34 @@ async def odometer_now():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/debug/charge-state")
+async def debug_charge_state():
+    """charge_stateの全フィールドを表示"""
+    from auth import get_valid_access_token
+    import httpx
+
+    token = await get_valid_access_token()
+    if not token:
+        return {"error": "未認証 - /auth/login からログインしてください"}
+
+    headers = {"Authorization": f"Bearer {token}"}
+    api_base = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        v_resp = await client.get(f"{api_base}/api/1/vehicles", headers=headers)
+        vehicles = v_resp.json().get("response", [])
+        if not vehicles:
+            return {"error": "車両なし"}
+
+        vid = vehicles[0]["id"]
+        r = await client.get(
+            f"{api_base}/api/1/vehicles/{vid}/vehicle_data",
+            headers=headers,
+            params={"endpoints": "charge_state"},
+        )
+        return r.json()
+
+
 # ─── Tesla パートナー登録 ───────────────────────────────────────
 
 
