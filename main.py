@@ -242,19 +242,32 @@ async def odometer_now():
 @app.get("/auth/register-partner", response_class=HTMLResponse)
 async def register_partner():
     """Tesla Fleet API パートナーアカウントを登録（初回1回のみ実行）"""
-    if not is_authenticated():
-        return RedirectResponse("/auth/login")
-
     import httpx
-    from auth import get_valid_access_token
     api_base = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
     domain = "tesla-data-collector-513607963402.asia-northeast1.run.app"
+    client_id = os.getenv("TESLA_CLIENT_ID")
+    client_secret = os.getenv("TESLA_CLIENT_SECRET")
 
-    token = await get_valid_access_token()
+    # M2M (client_credentials) トークンを取得
     async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            "https://auth.tesla.com/oauth2/v3/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": "openid vehicle_device_data vehicle_charging_cmds",
+                "audience": api_base,
+            },
+        )
+        if token_resp.status_code != 200:
+            return f"<html><body style='background:#1a1a1a;color:#fff;padding:40px;'><h2>❌ M2Mトークン取得失敗</h2><pre>{token_resp.text}</pre></body></html>"
+
+        m2m_token = token_resp.json()["access_token"]
+
         response = await client.post(
             f"{api_base}/api/1/partner_accounts",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {m2m_token}", "Content-Type": "application/json"},
             json={"domain": domain},
         )
 
