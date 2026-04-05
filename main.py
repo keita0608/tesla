@@ -236,6 +236,44 @@ async def odometer_now():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Tesla パートナー登録 ───────────────────────────────────────
+
+
+@app.get("/auth/register-partner", response_class=HTMLResponse)
+async def register_partner():
+    """Tesla Fleet API パートナーアカウントを登録（初回1回のみ実行）"""
+    if not is_authenticated():
+        return RedirectResponse("/auth/login")
+
+    import httpx
+    from auth import get_valid_access_token
+    api_base = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
+    domain = "tesla-data-collector-513607963402.asia-northeast1.run.app"
+
+    token = await get_valid_access_token()
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{api_base}/api/1/partner_accounts",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"domain": domain},
+        )
+
+    if response.status_code in (200, 201):
+        result = "✅ パートナー登録成功！"
+        detail = response.text
+    else:
+        result = f"❌ 登録失敗 (HTTP {response.status_code})"
+        detail = response.text
+
+    return f"""
+    <html><body style="font-family:sans-serif;background:#1a1a1a;color:#fff;padding:40px;">
+    <h2>{result}</h2>
+    <pre style="background:#2a2a2a;padding:15px;border-radius:5px;overflow:auto;">{detail}</pre>
+    <p><a href="/" style="color:#e82127;">← トップに戻る</a></p>
+    </body></html>
+    """
+
+
 # ─── Tesla 公開鍵エンドポイント ────────────────────────────────
 
 
