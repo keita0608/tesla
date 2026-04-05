@@ -300,6 +300,46 @@ async def tesla_public_key():
     return PlainTextResponse(public_key, media_type="application/x-pem-file")
 
 
+# ─── 診断エンドポイント ────────────────────────────────────────
+
+
+@app.get("/debug/charging")
+async def debug_charging():
+    """充電履歴エンドポイントの診断"""
+    from auth import get_valid_access_token
+    import httpx
+
+    token = await get_valid_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    api_base = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
+
+    # 車両情報を取得
+    async with httpx.AsyncClient() as client:
+        v_resp = await client.get(f"{api_base}/api/1/vehicles", headers=headers)
+        vehicles = v_resp.json().get("response", [])
+
+    if not vehicles:
+        return {"error": "車両なし"}
+
+    v = vehicles[0]
+    vehicle_id = v.get("id")
+    vehicle_id_s = v.get("id_s")
+    vin = v.get("vin")
+
+    results = {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for label, url in [
+            ("id", f"{api_base}/api/1/vehicles/{vehicle_id}/charging_history"),
+            ("id_s", f"{api_base}/api/1/vehicles/{vehicle_id_s}/charging_history"),
+            ("vin", f"{api_base}/api/1/vehicles/{vin}/charging_history"),
+            ("id+params", f"{api_base}/api/1/vehicles/{vehicle_id}/charging_history?page_no=1&page_size=5"),
+        ]:
+            r = await client.get(url, headers=headers)
+            results[label] = {"status": r.status_code, "body": r.text[:200]}
+
+    return {"vehicle_keys": {"id": vehicle_id, "id_s": vehicle_id_s, "vin": vin}, "results": results}
+
+
 # ─── Cloud Scheduler 用内部エンドポイント ──────────────────────
 
 
