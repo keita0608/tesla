@@ -1,13 +1,14 @@
 """
 Tesla データ収集 Web アプリ
 FastAPI + Tesla Fleet API + Google Sheets
+Cloud Run / Cloud Scheduler 対応
 """
 import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Header
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from dotenv import load_dotenv
 
@@ -18,8 +19,6 @@ from auth import (
     is_authenticated,
     load_tokens,
 )
-from scheduler import start_scheduler, stop_scheduler
-from sheets import check_connection
 
 load_dotenv()
 
@@ -29,15 +28,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Cloud Scheduler からのリクエストを認証するシークレット
+SCHEDULER_SECRET = os.getenv("SCHEDULER_SECRET", "")
+
 # PKCE用の一時データ（メモリ内・シングルプロセス前提）
 _pkce_store: dict[str, str] = {}  # state -> code_verifier
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    start_scheduler()
+    logger.info("Tesla Data Collector 起動")
     yield
-    stop_scheduler()
+    logger.info("Tesla Data Collector 停止")
 
 
 app = FastAPI(
@@ -53,6 +55,7 @@ app = FastAPI(
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """トップページ：認証状態と操作メニューを表示"""
+    from sheets import check_connection
     authenticated = is_authenticated()
     sheets_ok = check_connection()
 
@@ -81,8 +84,6 @@ async def index():
             .btn:hover {{ background: #555; }}
             .btn-primary {{ background: #e82127; }}
             .btn-primary:hover {{ background: #c41a20; }}
-            table {{ width: 100%; border-collapse: collapse; }}
-            th, td {{ padding: 8px; border-bottom: 1px solid #444; text-align: left; }}
         </style>
     </head>
     <body>
@@ -107,15 +108,9 @@ async def index():
         <div class="card">
             <h2>オドメータ</h2>
             <p>現在のオドメータを取得してGoogle Sheetsに保存します。<br>
-            ※ 毎日 23:59 JST に自動記録されます。</p>
+            ※ 毎日 23:59 JST に Cloud Scheduler が自動記録します。</p>
             <a href="/odometer/now" class="btn btn-primary">🚗 今すぐオドメータを記録</a>
             <a href="/odometer/current" class="btn">📊 現在値を表示（JSON）</a>
-        </div>
-
-        <div class="card">
-            <h2>スケジューラ</h2>
-            <p>毎日 23:59 JST にオドメータを自動取得・記録します。</p>
-            <a href="/scheduler/status" class="btn">🕒 スケジューラ状態確認</a>
         </div>
     </body>
     </html>
@@ -151,7 +146,7 @@ async def auth_callback(
         raise HTTPException(status_code=400, detail="不正なstateパラメータです。再度ログインしてください。")
 
     try:
-        tokens = await exchange_code_for_tokens(code, code_verifier)
+        await exchange_code_for_tokens(code, code_verifier)
         return RedirectResponse("/?auth=success")
     except Exception as e:
         logger.error(f"トークン取得エラー: {e}")
@@ -164,10 +159,7 @@ async def auth_status():
     tokens = load_tokens()
     if not tokens:
         return {"authenticated": False}
-    return {
-        "authenticated": True,
-        "has_refresh_token": "refresh_token" in tokens,
-    }
+    return {"authenticated": True, "has_refresh_token": "refresh_token" in tokens}
 
 
 # ─── 充電履歴 ──────────────────────────────────────────────────
@@ -216,8 +208,7 @@ async def odometer_current():
     if not is_authenticated():
         raise HTTPException(status_code=401, detail="Tesla未認証。/auth/login からログインしてください。")
     from tesla_api import get_odometer
-    data = await get_odometer()
-    return data
+    return await get_odometer()
 
 
 @app.get("/odometer/now", response_class=HTMLResponse)
@@ -245,18 +236,29 @@ async def odometer_now():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─── スケジューラ状態 ──────────────────────────────────────────
+# ─── Cloud Scheduler 用内部エンドポイント ──────────────────────
 
 
-@app.get("/scheduler/status")
-async def scheduler_status():
-    """スケジューラの状態を確認"""
-    from scheduler import scheduler
-    jobs = []
-    for job in scheduler.get_jobs():
-        jobs.append({
-            "id": job.id,
-            "name": job.name,
-            "next_run": str(job.next_run_time),
-        })
-    return {"running": scheduler.running, "jobs": jobs}
+@app.post("/internal/record-odometer")
+async def internal_record_odometer(x_scheduler_secret: str = Header(None)):
+    """
+    Cloud Scheduler から毎日 23:59 JST に呼び出されるエンドポイント
+    SCHEDULER_SECRET ヘッダーで認証
+    """
+    if SCHEDULER_SECRET and x_scheduler_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=403, detail="認証エラー")
+
+    if not is_authenticated():
+        raise HTTPException(status_code=401, detail="Tesla未認証")
+
+    from tesla_api import get_odometer
+    from sheets import save_odometer
+
+    try:
+        data = await get_odometer()
+        save_odometer(data["odometer_km"], data["vehicle_name"])
+        logger.info(f"[Cloud Scheduler] オドメータ記録完了: {data['odometer_km']}km")
+        return {"status": "ok", "odometer_km": data["odometer_km"]}
+    except Exception as e:
+        logger.error(f"[Cloud Scheduler] オドメータ取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
