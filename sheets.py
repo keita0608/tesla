@@ -4,7 +4,9 @@ Google Sheets 連携モジュール
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+JST = timezone(timedelta(hours=9))
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -25,7 +27,7 @@ SHEET_ODOMETER = "オドメータ"
 SHEET_CHARGING = "充電履歴"
 
 # オドメーターシートのヘッダー
-ODOMETER_HEADERS = ["記録日", "オドメータ(km)", "前日比(km)", "取得時刻", "車両名"]
+ODOMETER_HEADERS = ["記録日", "取得時刻(JST)", "オドメータ(km)", "前日比(km)"]
 
 # 充電履歴シートのヘッダー
 CHARGING_HEADERS = [
@@ -71,8 +73,10 @@ def save_odometer(odometer_km: float, vehicle_name: str) -> None:
     spreadsheet = client.open_by_key(SHEET_ID)
     worksheet = _get_or_create_sheet(spreadsheet, SHEET_ODOMETER, ODOMETER_HEADERS)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    now_time = datetime.now().strftime("%H:%M:%S")
+    now_jst = datetime.now(JST)
+    today = now_jst.strftime("%Y-%m-%d")
+    now_time = now_jst.strftime("%H:%M:%S")
+    odometer_fmt = f"{odometer_km:,.1f}"
 
     # 既存データから前日のオドメーターを取得して前日比を計算
     all_values = worksheet.get_all_values()
@@ -81,15 +85,15 @@ def save_odometer(odometer_km: float, vehicle_name: str) -> None:
 
     if len(all_values) > 1:  # ヘッダー行を除く
         for row in reversed(all_values[1:]):
-            if len(row) >= 2 and row[0] != today and row[1]:
+            if len(row) >= 3 and row[0] != today and row[2]:
                 try:
-                    prev_odometer = float(row[1])
+                    prev_odometer = float(row[2].replace(",", ""))
                     daily_diff = round(odometer_km - prev_odometer, 1)
                     break
                 except ValueError:
                     continue
 
-    row = [today, odometer_km, daily_diff, now_time, vehicle_name]
+    row = [today, now_time, odometer_fmt, daily_diff]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
     print(f"[Sheets] オドメータ保存: {today} {odometer_km}km (前日比: {daily_diff}km)")
 
