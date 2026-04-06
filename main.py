@@ -220,6 +220,13 @@ async def index(request: Request, user: str = Depends(require_login)):
         </div>
 
         <div class="card">
+            <h2>📥 充電履歴インポート</h2>
+            <p>「充電履歴_入力」シートにデータを貼り付けてから取り込みます。</p>
+            <a href="/charging/setup-input-sheet" class="btn">🗂️ 入力シートを準備</a>
+            <a href="/charging/import" class="btn btn-primary">📤 入力シートから取込</a>
+        </div>
+
+        <div class="card">
             <h2>オドメータ</h2>
             <p>※ 毎日 23:59 JST に Cloud Scheduler が自動記録します。</p>
             <a href="/odometer/now" class="btn btn-primary">🚗 今すぐオドメータを記録</a>
@@ -285,6 +292,64 @@ async def charging_sync():
         return f"""<html><body style="font-family:sans-serif;background:#1a1a1a;color:#fff;padding:40px;">
         <h2>✅ 充電履歴同期完了</h2>
         <p>取得件数: {len(sessions)}件 / 新規追加: {added}件</p>
+        <p><a href="/" style="color:#e82127;">← トップに戻る</a></p>
+        </body></html>"""
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── 充電履歴インポート ────────────────────────────────────────
+
+
+@app.get("/charging/setup-input-sheet", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+async def setup_input_sheet():
+    """充電履歴_入力シートを準備"""
+    from sheets import setup_input_sheet as _setup
+    try:
+        msg = _setup()
+        return f"""<html><body style="font-family:sans-serif;background:#1a1a1a;color:#fff;padding:40px;">
+        <h2>✅ {msg}</h2>
+        <h3>入力方法</h3>
+        <ol style="line-height:2;">
+            <li>Teslaサイトから充電データCSVをダウンロード</li>
+            <li>スプレッドシートの「充電履歴_入力」シートを開く</li>
+            <li>CSVの内容を貼り付け（開始日時はJSTに変換）</li>
+            <li>費用・都道府県・場所名・プロバイダーを手入力</li>
+            <li>アプリに戻り「入力シートから取込」をクリック</li>
+        </ol>
+        <h3>列の対応（Tesla公式CSV → 入力シート）</h3>
+        <table style="border-collapse:collapse;width:100%;">
+            <tr style="background:#333;"><th style="padding:8px;border:1px solid #555;">入力シート列</th><th style="padding:8px;border:1px solid #555;">Tesla CSV列</th><th style="padding:8px;border:1px solid #555;">備考</th></tr>
+            <tr><td style="padding:8px;border:1px solid #555;">開始日時(JST)</td><td style="padding:8px;border:1px solid #555;">Charge Start Time (UTC)</td><td style="padding:8px;border:1px solid #555;">UTC+9時間に変換</td></tr>
+            <tr><td style="padding:8px;border:1px solid #555;">終了日時(JST)</td><td style="padding:8px;border:1px solid #555;">Charge End Time (UTC)</td><td style="padding:8px;border:1px solid #555;">UTC+9時間に変換</td></tr>
+            <tr><td style="padding:8px;border:1px solid #555;">充電時間(分)</td><td style="padding:8px;border:1px solid #555;">Charge Duration (s)</td><td style="padding:8px;border:1px solid #555;">÷60で分に変換</td></tr>
+            <tr><td style="padding:8px;border:1px solid #555;">充電量(kWh)</td><td style="padding:8px;border:1px solid #555;">Energy Added (kWh)</td><td style="padding:8px;border:1px solid #555;">そのまま</td></tr>
+            <tr><td style="padding:8px;border:1px solid #555;">充電タイプ</td><td style="padding:8px;border:1px solid #555;">Charger Type</td><td style="padding:8px;border:1px solid #555;">そのまま</td></tr>
+            <tr style="background:#2a3a2a;"><td style="padding:8px;border:1px solid #555;">費用(¥)</td><td style="padding:8px;border:1px solid #555;">-</td><td style="padding:8px;border:1px solid #555;">手入力（緑色列）</td></tr>
+            <tr style="background:#2a3a2a;"><td style="padding:8px;border:1px solid #555;">都道府県</td><td style="padding:8px;border:1px solid #555;">-</td><td style="padding:8px;border:1px solid #555;">手入力（緑色列）</td></tr>
+            <tr style="background:#2a3a2a;"><td style="padding:8px;border:1px solid #555;">場所名</td><td style="padding:8px;border:1px solid #555;">-</td><td style="padding:8px;border:1px solid #555;">手入力（緑色列）</td></tr>
+            <tr style="background:#2a3a2a;"><td style="padding:8px;border:1px solid #555;">プロバイダー</td><td style="padding:8px;border:1px solid #555;">-</td><td style="padding:8px;border:1px solid #555;">手入力（緑色列）</td></tr>
+        </table>
+        <br><a href="/" style="color:#e82127;">← トップに戻る</a>
+        </body></html>"""
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/charging/import", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+async def charging_import():
+    """充電履歴_入力シートから充電履歴シートへ取り込む"""
+    from sheets import import_from_input_sheet
+    try:
+        result = import_from_input_sheet()
+        errors_html = ""
+        if result["errors"]:
+            errors_html = "<h3>⚠️ エラー</h3><ul>" + "".join(f"<li>{e}</li>" for e in result["errors"]) + "</ul>"
+        return f"""<html><body style="font-family:sans-serif;background:#1a1a1a;color:#fff;padding:40px;">
+        <h2>✅ インポート完了</h2>
+        <p>新規取込: <strong>{result['imported']}件</strong></p>
+        <p>重複スキップ: {result['skipped']}件</p>
+        {errors_html}
         <p><a href="/" style="color:#e82127;">← トップに戻る</a></p>
         </body></html>"""
     except Exception as e:
