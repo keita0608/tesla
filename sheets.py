@@ -43,17 +43,21 @@ CHARGING_HEADERS = [
     "プロバイダー",
 ]
 
-# 入力シートのヘッダー（ユーザーが貼り付ける列）
+# 入力シートのヘッダー（Tesla CSV形式 + 手入力列）
 INPUT_HEADERS = [
-    "開始日時(JST)",   # A: Tesla CSV の Charge Start Time をJST変換
-    "終了日時(JST)",   # B: Tesla CSV の Charge End Time をJST変換
-    "充電時間(分)",    # C: Tesla CSV の Charge Duration(s)÷60
-    "充電量(kWh)",     # D: Tesla CSV の Energy Added (kWh)
-    "充電タイプ",      # E: Tesla CSV の Charger Type
-    "費用(¥)",         # F: 手入力
-    "都道府県",        # G: 手入力
-    "場所名",          # H: 手入力
-    "プロバイダー",    # I: 手入力
+    "Charge Start Time (UTC)",   # A: Tesla CSV そのまま貼り付け
+    "Charge End Time (UTC)",     # B: Tesla CSV そのまま貼り付け
+    "Charge Duration (s)",       # C: Tesla CSV そのまま貼り付け
+    "Energy Added (kWh)",        # D: Tesla CSV そのまま貼り付け
+    "Charger Type",              # E: Tesla CSV そのまま貼り付け
+    "Charge Start Time (JST)",   # F: 数式列（アプリは無視）
+    "Charge End Time (JST)",     # G: 数式列（アプリは無視）
+    "Minutes",                   # H: 数式列（アプリは無視）
+    "Date",                      # I: 数式列（アプリは無視）
+    "Price",                     # J: 手入力
+    "Prefecture",                # K: 手入力
+    "Location",                  # L: 手入力
+    "Provider",                  # M: 手入力
 ]
 
 
@@ -74,6 +78,21 @@ def _get_or_create_sheet(spreadsheet: gspread.Spreadsheet, sheet_name: str, head
         worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=5000, cols=len(headers))
         worksheet.append_row(headers, value_input_option="USER_ENTERED")
     return worksheet
+
+
+def _utc_to_jst(utc_str: str) -> str:
+    """UTC文字列をJST（+9時間）に変換して返す"""
+    if not utc_str:
+        return ""
+    # Tesla CSVの形式: "2023/10/29 11:13" or "2023-10-29 11:13" 等
+    for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt_utc = datetime.strptime(utc_str, fmt).replace(tzinfo=timezone.utc)
+            dt_jst = dt_utc.astimezone(JST)
+            return dt_jst.strftime("%Y/%m/%d %H:%M")
+        except ValueError:
+            continue
+    return utc_str  # 変換できない場合はそのまま返す
 
 
 def setup_input_sheet() -> str:
@@ -140,27 +159,42 @@ def import_from_input_sheet() -> dict:
         if not any(row):  # 空行はスキップ
             continue
 
-        # 開始日時（必須）
-        start_time = row[0].strip() if len(row) > 0 else ""
-        if not start_time:
+        # A列: Charge Start Time (UTC) が必須
+        start_utc = row[0].strip() if len(row) > 0 else ""
+        if not start_utc:
             continue
 
-        # 重複チェック
-        if start_time in existing_keys:
+        # UTC→JST変換（+9時間）
+        try:
+            start_jst = _utc_to_jst(start_utc)
+            end_jst = _utc_to_jst(row[1].strip() if len(row) > 1 else "")
+        except Exception as e:
+            errors.append(f"行{i}: 日時変換エラー - {e}")
             continue
 
-        # データを整形
+        # 重複チェック（開始日時JSTで判定）
+        if start_jst in existing_keys:
+            continue
+
+        # 充電時間：秒→分に変換
+        try:
+            duration_sec = float(row[2].strip()) if len(row) > 2 and row[2].strip() else 0
+            duration_min = round(duration_sec / 60) if duration_sec else ""
+        except ValueError:
+            duration_min = ""
+
+        # データを整形（A〜EのTesla CSV + J〜Mの手入力）
         try:
             new_row = [
-                start_time,                                          # 開始日時(JST)
-                row[1].strip() if len(row) > 1 else "",             # 終了日時(JST)
-                row[2].strip() if len(row) > 2 else "",             # 充電時間(分)
-                row[3].strip() if len(row) > 3 else "",             # 充電量(kWh)
-                row[4].strip() if len(row) > 4 else "",             # 充電タイプ
-                row[5].strip() if len(row) > 5 else "",             # 費用(¥)
-                row[6].strip() if len(row) > 6 else "",             # 都道府県
-                row[7].strip() if len(row) > 7 else "",             # 場所名
-                row[8].strip() if len(row) > 8 else "",             # プロバイダー
+                start_jst,                                            # 開始日時(JST)
+                end_jst,                                              # 終了日時(JST)
+                duration_min,                                         # 充電時間(分)
+                row[3].strip() if len(row) > 3 else "",              # 充電量(kWh)
+                row[4].strip() if len(row) > 4 else "",              # 充電タイプ
+                row[9].strip() if len(row) > 9 else "",              # 費用(¥) ← J列
+                row[10].strip() if len(row) > 10 else "",            # 都道府県 ← K列
+                row[11].strip() if len(row) > 11 else "",            # 場所名 ← L列
+                row[12].strip() if len(row) > 12 else "",            # プロバイダー ← M列
             ]
             new_rows.append(new_row)
         except Exception as e:
