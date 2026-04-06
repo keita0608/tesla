@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Header
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
 
@@ -54,6 +55,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Tesla Data Collector", lifespan=lifespan)
+
+# 静的ファイル配信
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # セッションミドルウェア（Google OAuth用）
 app.add_middleware(
@@ -186,18 +190,27 @@ async def index(request: Request, user: str = Depends(require_login)):
     <html lang="ja">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Tesla DC">
+        <meta name="theme-color" content="#e82127">
+        <link rel="manifest" href="/static/manifest.json">
+        <link rel="apple-touch-icon" href="/static/icon-192.png">
         <title>Tesla Data Collector</title>
         <style>
-            body {{ font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #1a1a1a; color: #fff; }}
-            h1 {{ color: #e82127; }}
-            .card {{ background: #2a2a2a; border-radius: 10px; padding: 20px; margin: 15px 0; }}
-            .status {{ display: flex; gap: 20px; flex-wrap: wrap; }}
-            .btn {{ display: inline-block; background: #444; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none; margin: 5px; }}
-            .btn:hover {{ background: #555; }}
+            * {{ box-sizing: border-box; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: env(safe-area-inset-top, 20px) 16px 40px; background: #1a1a1a; color: #fff; }}
+            h1 {{ color: #e82127; font-size: 1.6em; margin-bottom: 4px; }}
+            h2 {{ font-size: 1.1em; margin: 0 0 12px; }}
+            .card {{ background: #2a2a2a; border-radius: 12px; padding: 16px; margin: 12px 0; }}
+            .status {{ display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.9em; }}
+            .btn {{ display: inline-block; background: #444; color: white; padding: 10px 18px; border-radius: 8px; text-decoration: none; margin: 4px; font-size: 0.9em; }}
+            .btn:active {{ opacity: 0.7; }}
             .btn-primary {{ background: #e82127; }}
-            .btn-primary:hover {{ background: #c41a20; }}
-            .user-info {{ text-align: right; font-size: 0.85em; color: #aaa; margin-bottom: 10px; }}
+            .btn-full {{ display: block; text-align: center; width: 100%; }}
+            .user-info {{ text-align: right; font-size: 0.8em; color: #aaa; margin-bottom: 8px; padding-top: 8px; }}
         </style>
     </head>
     <body>
@@ -231,6 +244,12 @@ async def index(request: Request, user: str = Depends(require_login)):
             <p>※ 毎日 23:59 JST に Cloud Scheduler が自動記録します。</p>
             <a href="/odometer/now" class="btn btn-primary">🚗 今すぐオドメータを記録</a>
             <a href="/odometer/current" class="btn">📊 現在値（JSON）</a>
+        </div>
+
+        <div class="card">
+            <h2>📊 集計レポート</h2>
+            <p>充電履歴から月次集計と充電場所ランキングを自動生成します。</p>
+            <a href="/summary/update" class="btn btn-primary">🔄 集計を更新</a>
         </div>
     </body>
     </html>
@@ -440,6 +459,32 @@ async def register_partner():
     return f"""<html><body style="font-family:sans-serif;background:#1a1a1a;color:#fff;padding:40px;">
     <h2>{result}</h2><pre style="background:#2a2a2a;padding:15px;border-radius:5px;">{response.text}</pre>
     <p><a href="/" style="color:#e82127;">← トップに戻る</a></p></body></html>"""
+
+
+# ─── 集計レポート ──────────────────────────────────────────────
+
+
+@app.get("/summary/update", response_class=HTMLResponse, dependencies=[Depends(require_login)])
+async def summary_update():
+    """月次集計・充電場所ランキングを更新"""
+    from sheets import calculate_monthly_summary, calculate_location_ranking
+    try:
+        monthly = calculate_monthly_summary()
+        location = calculate_location_ranking()
+        monthly_err = f'<p style="color:#f88">⚠️ {monthly.get("error")}</p>' if monthly.get("error") else ""
+        location_err = f'<p style="color:#f88">⚠️ {location.get("error")}</p>' if location.get("error") else ""
+        return f"""<html><body style="font-family:sans-serif;background:#1a1a1a;color:#fff;padding:40px;">
+        <h2>✅ 集計更新完了</h2>
+        <h3>月次集計</h3>
+        <p>更新: <strong>{monthly.get('months', 0)}ヶ月分</strong></p>
+        {monthly_err}
+        <h3>充電場所ランキング</h3>
+        <p>更新: <strong>{location.get('locations', 0)}件</strong></p>
+        {location_err}
+        <p><a href="/" style="color:#e82127;">← トップに戻る</a></p>
+        </body></html>"""
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ─── デバッグ ──────────────────────────────────────────────────

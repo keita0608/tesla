@@ -273,6 +273,270 @@ def save_charging_history(sessions: list[dict]) -> int:
     return len(new_rows)
 
 
+# 月次集計シートのヘッダー
+MONTHLY_HEADERS = [
+    "年月",
+    "無料充電量(kWh)",
+    "有料充電量(kWh)",
+    "費用(¥)",
+    "総走行距離(km)",
+    "月間走行距離(km)",
+    "電費(円/km)",
+    "電費(円/kWh)",
+]
+
+# 充電場所ランキングシートのヘッダー
+LOCATION_HEADERS = [
+    "場所名",
+    "都道府県",
+    "プロバイダー",
+    "充電量(kWh)",
+    "利用回数",
+    "利用金額(¥)",
+    "1kW単価(¥/kWh)",
+]
+
+SHEET_MONTHLY = "月次集計"
+SHEET_LOCATION = "充電場所ランキング"
+
+
+def calculate_monthly_summary() -> dict:
+    """
+    充電履歴・オドメータから月次集計を計算してシートに書き込む
+    戻り値: {"months": int, "updated": bool}
+    """
+    client = _get_client()
+    spreadsheet = client.open_by_key(SHEET_ID)
+
+    # 充電履歴を読み込む
+    try:
+        charging_ws = spreadsheet.worksheet(SHEET_CHARGING)
+        charging_rows = charging_ws.get_all_values()
+    except gspread.WorksheetNotFound:
+        return {"months": 0, "updated": False, "error": "充電履歴シートが見つかりません"}
+
+    # オドメータを読み込む
+    try:
+        odo_ws = spreadsheet.worksheet(SHEET_ODOMETER)
+        odo_rows = odo_ws.get_all_values()
+    except gspread.WorksheetNotFound:
+        odo_rows = []
+
+    # 充電履歴を月別に集計
+    # headers: 開始日時(JST), 終了日時(JST), 充電時間(分), 充電量(kWh), 充電タイプ, 費用(¥), 都道府県, 場所名, プロバイダー
+    monthly_data: dict[str, dict] = {}
+
+    for row in charging_rows[1:]:
+        if not any(row) or not row[0]:
+            continue
+        start_jst = row[0].strip()
+        # 年月を抽出（例: "2024/01/15 10:30" → "2024/01"）
+        try:
+            if "/" in start_jst:
+                parts = start_jst.split("/")
+                ym = f"{parts[0]}/{parts[1]}"
+            elif "-" in start_jst:
+                parts = start_jst.split("-")
+                ym = f"{parts[0]}/{parts[1]}"
+            else:
+                continue
+        except (IndexError, ValueError):
+            continue
+
+        if ym not in monthly_data:
+            monthly_data[ym] = {"free_kwh": 0.0, "paid_kwh": 0.0, "cost": 0.0}
+
+        try:
+            kwh = float(row[3].replace(",", "")) if len(row) > 3 and row[3].strip() else 0.0
+        except ValueError:
+            kwh = 0.0
+
+        try:
+            cost = float(row[5].replace(",", "")) if len(row) > 5 and row[5].strip() else 0.0
+        except ValueError:
+            cost = 0.0
+
+        charger_type = row[4].strip() if len(row) > 4 else ""
+        # Supercharger = 有料、それ以外 = 無料（費用が0なら無料とみなす）
+        if cost > 0:
+            monthly_data[ym]["paid_kwh"] += kwh
+            monthly_data[ym]["cost"] += cost
+        else:
+            monthly_data[ym]["free_kwh"] += kwh
+
+    # オドメータから月末走行距離を収集
+    # headers: 記録日, 取得時刻(JST), オドメータ(km), 前日比(km)
+    monthly_odo: dict[str, float] = {}  # 年月 → 月末オドメータ値（最大値）
+    for row in odo_rows[1:]:
+        if not any(row) or not row[0]:
+            continue
+        date_str = row[0].strip()
+        try:
+            if "-" in date_str:
+                parts = date_str.split("-")
+                ym = f"{parts[0]}/{parts[1]}"
+            elif "/" in date_str:
+                parts = date_str.split("/")
+                ym = f"{parts[0]}/{parts[1]}"
+            else:
+                continue
+            odo_val = float(row[2].replace(",", "")) if len(row) > 2 and row[2].strip() else 0.0
+            if ym not in monthly_odo or odo_val > monthly_odo[ym]:
+                monthly_odo[ym] = odo_val
+        except (IndexError, ValueError):
+            continue
+
+    # 月次集計シートを作成・更新
+    monthly_ws = _get_or_create_sheet(spreadsheet, SHEET_MONTHLY, MONTHLY_HEADERS)
+
+    # 全データを上書き（ヘッダー行を残して書き直し）
+    sorted_months = sorted(monthly_data.keys())
+    new_rows = []
+    odo_list = sorted(monthly_odo.keys())
+
+    for i, ym in enumerate(sorted_months):
+        d = monthly_data[ym]
+        free_kwh = round(d["free_kwh"], 2)
+        paid_kwh = round(d["paid_kwh"], 2)
+        total_kwh = free_kwh + paid_kwh
+        cost = round(d["cost"])
+
+        # 総走行距離（その月の最大オドメータ値）
+        total_odo = monthly_odo.get(ym, "")
+        total_odo_fmt = f"{total_odo:,.1f}" if isinstance(total_odo, float) and total_odo > 0 else ""
+
+        # 月間走行距離（前月末との差分）
+        monthly_km = ""
+        if i > 0:
+            prev_ym = sorted_months[i - 1]
+            prev_odo = monthly_odo.get(prev_ym)
+            cur_odo = monthly_odo.get(ym)
+            if prev_odo and cur_odo:
+                monthly_km = round(cur_odo - prev_odo, 1)
+        elif odo_list:
+            # 最初の月は総走行距離をそのまま使う場合もある
+            pass
+
+        # 電費計算
+        cost_per_km = ""
+        cost_per_kwh = ""
+        if isinstance(monthly_km, (int, float)) and monthly_km > 0 and cost > 0:
+            cost_per_km = round(cost / monthly_km, 1)
+        if total_kwh > 0 and cost > 0:
+            cost_per_kwh = round(cost / paid_kwh, 1) if paid_kwh > 0 else ""
+
+        new_rows.append([
+            ym,
+            free_kwh,
+            paid_kwh,
+            cost,
+            total_odo_fmt,
+            monthly_km,
+            cost_per_km,
+            cost_per_kwh,
+        ])
+
+    # ヘッダー行以降を全て上書き
+    # 既存データをクリアして書き直す
+    all_values = monthly_ws.get_all_values()
+    if len(all_values) > 1:
+        # データ行を削除（ヘッダーは残す）
+        monthly_ws.delete_rows(2, len(all_values))
+
+    if new_rows:
+        monthly_ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+
+    print(f"[Sheets] 月次集計更新: {len(new_rows)}ヶ月分")
+    return {"months": len(new_rows), "updated": True}
+
+
+def calculate_location_ranking() -> dict:
+    """
+    充電履歴から充電場所ランキングを計算してシートに書き込む
+    戻り値: {"locations": int, "updated": bool}
+    """
+    client = _get_client()
+    spreadsheet = client.open_by_key(SHEET_ID)
+
+    try:
+        charging_ws = spreadsheet.worksheet(SHEET_CHARGING)
+        charging_rows = charging_ws.get_all_values()
+    except gspread.WorksheetNotFound:
+        return {"locations": 0, "updated": False, "error": "充電履歴シートが見つかりません"}
+
+    # 場所別に集計
+    # headers: 開始日時(JST), 終了日時(JST), 充電時間(分), 充電量(kWh), 充電タイプ, 費用(¥), 都道府県, 場所名, プロバイダー
+    location_data: dict[str, dict] = {}
+
+    for row in charging_rows[1:]:
+        if not any(row) or not row[0]:
+            continue
+
+        location = row[7].strip() if len(row) > 7 and row[7].strip() else "不明"
+        prefecture = row[6].strip() if len(row) > 6 else ""
+        provider = row[8].strip() if len(row) > 8 else ""
+
+        try:
+            kwh = float(row[3].replace(",", "")) if len(row) > 3 and row[3].strip() else 0.0
+        except ValueError:
+            kwh = 0.0
+
+        try:
+            cost = float(row[5].replace(",", "")) if len(row) > 5 and row[5].strip() else 0.0
+        except ValueError:
+            cost = 0.0
+
+        if location not in location_data:
+            location_data[location] = {
+                "prefecture": prefecture,
+                "provider": provider,
+                "kwh": 0.0,
+                "count": 0,
+                "cost": 0.0,
+            }
+
+        location_data[location]["kwh"] += kwh
+        location_data[location]["count"] += 1
+        location_data[location]["cost"] += cost
+        # 都道府県・プロバイダーは最新値で上書き（空でなければ）
+        if prefecture:
+            location_data[location]["prefecture"] = prefecture
+        if provider:
+            location_data[location]["provider"] = provider
+
+    # 充電量順にソート
+    sorted_locations = sorted(location_data.items(), key=lambda x: x[1]["kwh"], reverse=True)
+
+    location_ws = _get_or_create_sheet(spreadsheet, SHEET_LOCATION, LOCATION_HEADERS)
+
+    new_rows = []
+    for loc_name, d in sorted_locations:
+        kwh = round(d["kwh"], 2)
+        cost = round(d["cost"])
+        count = d["count"]
+        unit_price = round(cost / kwh, 1) if kwh > 0 and cost > 0 else ""
+        new_rows.append([
+            loc_name,
+            d["prefecture"],
+            d["provider"],
+            kwh,
+            count,
+            cost,
+            unit_price,
+        ])
+
+    # ヘッダー行以降を上書き
+    all_values = location_ws.get_all_values()
+    if len(all_values) > 1:
+        location_ws.delete_rows(2, len(all_values))
+
+    if new_rows:
+        location_ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+
+    print(f"[Sheets] 充電場所ランキング更新: {len(new_rows)}件")
+    return {"locations": len(new_rows), "updated": True}
+
+
 def check_connection() -> bool:
     """Google Sheets への接続確認"""
     try:
